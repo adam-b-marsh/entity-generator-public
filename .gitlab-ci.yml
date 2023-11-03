@@ -1,0 +1,116 @@
+---
+variables:
+        TWINE_REPOSITORY_URL: /
+
+default:
+  tags:
+    - docker
+  image: /base/python:latest
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+stages:
+  - test
+  - build
+  - publish
+  - release
+
+lint:
+  stage: test
+  image: /base/python:latest
+  script:
+    - pip install tox
+    - tox -e lint
+
+formatting:
+  stage: test
+  image: base/python:latest
+  script:
+    - pip install tox
+    - tox -e formatting
+
+.tests-template: &tests-template
+  stage: test
+  image: /base/python:latest
+  artifacts:
+    when: always
+    paths:
+      - htmlcov
+      - report.xml
+      - coverage.xml
+    reports:
+      junit: report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+
+.tests-command: &tests-command
+  - pip install tox
+  - tox -e py
+  # Work around GitLab coverage path issues
+  # https://gitlab.com/gitlab-org/gitlab/-/issues/217664
+  - sed -i "s|<source>.*</source>|<source>./crm_entity_generator</source>|g" coverage.xml
+  - sed -i "s|filename=\"|filename=\"crm_entity_generator/|g" coverage.xml
+
+tests-devel:
+  <<: *tests-template
+  script:
+    - pip install tox
+    - tox -e py --notest
+    - .tox/py/bin/pip install -U --pre abc-protobufs abc-crm-entity-generator
+    - *tests-command
+  rules:
+    - if: '$CI_COMMIT_BRANCH != "master" && $CI_COMMIT_TAG == null'
+
+tests-production:
+  <<: *tests-template
+  script:
+    - *tests-command
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_TAG != null'
+
+  artifacts:
+    when: always
+    paths:
+      - report.xml
+      - coverage.xml
+      - htmlcov
+    reports:
+      junit: report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+pages:
+  stage: publish
+  dependencies:
+    - tests-devel
+  script:
+    - mv htmlcov/ public/
+  artifacts:
+    paths:
+      - public
+  only:
+    - devel
+
+build-module:
+  stage: build
+  script:
+    - python setup.py bdist_wheel
+  artifacts:
+    paths:
+      - dist
+
+upload-module:
+  stage: release
+  dependencies:
+    - build-module
+  script:
+    - pip install twine
+    - twine upload -u ${TWINE_USERNAME} -p ${TWINE_PASSWORD} dist/\*
+  only:
+    - devel
+    - tags
